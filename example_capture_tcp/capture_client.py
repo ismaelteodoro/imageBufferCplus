@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+
+import argparse
+import socket
+import struct
+import time
+from dataclasses import dataclass
+from typing import Iterable, List
+
+import cv2
+import numpy as np
+
+
+FRAME_MAGIC = 0x314D5849
+HEADER_STRUCT = struct.Struct("<IQQIII")
+
+
+@dataclass(frozen=True)
+class RawFrame:
+    frame_id: int
+    timestamp_ns: int
+    width: int
+    height: int
+    payload: bytes
+
+
+class CaptureTcpClient:
+    def __init__(self, host: str, port: int, timeout_s: float = 5.0):
+        self.host = host
+        self.port = port
+        self.timeout_s = timeout_s
+
+    def get_latest(self) -> RawFrame:
+        return self._request_single("GET_LATEST")
+
+    def get_frame(self, frame_id: int) -> RawFrame:
+        return self._request_single(f"GET_FRAME {frame_id}")
+
+    def get_last(self, count: int) -> List[RawFrame]:
+        return self._request_frames(f"GET_LAST {count}")
+
+    def _request_single(self, command: str) -> RawFrame:
+        frames = self._request_frames(command)
+        if not frames:
+            raise RuntimeError("server returned no frames")
+        return frames[0]
+
+    def _request_frames(self, command: str) -> List[RawFrame]:
+        with socket.create_connection((self.host, self.port), timeout=self.timeout_s) as sock:
+            sock.settimeout(self.timeout_s)
+            sock.sendall((command + "\n").encode("ascii"))
+
+            status = self._read_line(sock)
+            if status.startswith("ERR "):
+                raise RuntimeError(status)
+            if not status.startswith("OK "):
+                raise RuntimeError(f"invalid server response: {status!r}")
+
+            frame_count = int(status.split()[1])
+            return [self._read_frame(sock) for _ in range(frame_count)]
+
+    def _read_frame(self, sock: socket.socket) -> RawFrame:
+        header = self._read_exact(sock, HEADER_STRUCT.size)
+        magic, frame_id, timestamp_ns, width, height, payload_size = HEADER_STRUCT.unpack(header)
+
+        if magic != FRAME_MAGIC:
+            raise RuntimeError(f"invalid frame magic: 0x{magic:08x}")
+
+        payload = self._read_exact(sock, payload_size)
+        return RawFrame(frame_id, timestamp_ns, width, height, payload)
+
+    @staticmethod
+    def _read_line(sock: socket.socket) -> str:
+        data = bytearray()
+        while True:
+            chunk = sock.recv(1)
+            if not chunk:
+                raise RuntimeError("connection closed while reading status line")
+            data += chunk
+            if chunk == b"\n":
+                return data.decode("ascii").strip()
+
+    @staticmethod
+    def _read_exact(sock: socket.socket, size: int) -> bytes:
+        data = bytearray()
+        while len(data) < size:
+            chunk = sock.recv(size - len(data))
+            if not chunk:
+                raise RuntimeError("connection closed while reading frame")
+            data += chunk
+        return bytes(data)
+
+
+def unpack_raw10_csi2p(payload: bytes, width: int, height: int) -> np.ndarray:
+    expected_size = width * height * 5 // 4
+    if len(payload) != expected_size:
+        raise ValueError(f"unexpected RAW10 payload size: got {len(payload)}, expected {expected_size}")
+
+    packed = np.frombuffer(payload, dtype=np.uint8).reshape(-1, 5).astype(np.uint16)
+
+    pixels = np.empty((packed.shape[0], 4), dtype=np.uint16)
+    pixels[:, 0] = (packed[:, 0] << 2) | (packed[:, 4] & 0x03)
+    pixels[:, 1] = (packed[:, 1] << 2) | ((packed[:, 4] >> 2) & 0x03)
+    pixels[:, 2] = (packed[:, 2] << 2) | ((packed[:, 4] >> 4) & 0x03)
+    pixels[:, 3] = (packed[:, 3] << 2) | ((packed[:, 4] >> 6) & 0x03)
+
+    return pixels.reshape(height, width)
+
+
+def frame_to_display_bgr(frame: RawFrame, debayer: bool) -> np.ndarray:
+    raw10 = unpack_raw10_csi2p(frame.payload, frame.width, frame.height)
+    gray8 = np.right_shift(raw10, 2).astype(np.uint8)
+
+    if not debayer:
+        return cv2.cvtColor(gray8, cv2.COLOR_GRAY2BGR)
+
+    # The current Raspberry Pi pipeline reports SBGGR10_CSI2P for the IMX296.
+    return cv2.cvtColor(gray8, cv2.COLOR_BayerBG2BGR)
+
+
+def iter_requested_frames(client: CaptureTcpClient, args: argparse.Namespace) -> Iterable[RawFrame]:
+    if args.mode == "latest":
+        for _ in range(args.count):
+            yield client.get_latest()
+            if args.interval_ms > 0:
+                time.sleep(args.interval_ms / 1000.0)
+        return
+
+    if args.mode == "last":
+        yield from client.get_last(args.last)
+        return
+
+    if args.mode == "frame":
+        yield client.get_frame(args.frame_id)
+        return
+
+    raise ValueError(f"unknown mode: {args.mode}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Example TCP client for imageBufferCplus RAW10 frames")
+    parser.add_argument("--host", required=True, help="Raspberry Pi IP or hostname")
+    parser.add_argument("--port", type=int, default=8000, help="TCP port")
+    parser.add_argument("--mode", choices=("latest", "last", "frame"), default="latest")
+    parser.add_argument("--count", type=int, default=20, help="Number of GET_LATEST requests")
+    parser.add_argument("--last", type=int, default=5, help="Number of frames for GET_LAST")
+    parser.add_argument("--frame-id", type=int, default=1, help="Frame id for GET_FRAME")
+    parser.add_argument("--interval-ms", type=int, default=100, help="Delay between GET_LATEST requests")
+    parser.add_argument("--no-debayer", action="store_true", help="Show raw grayscale instead of debayered BGR")
+    parser.add_argument("--save-dir", default="", help="Optional directory to save PNG previews")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    client = CaptureTcpClient(args.host, args.port)
+
+    for frame in iter_requested_frames(client, args):
+        image = frame_to_display_bgr(frame, debayer=not args.no_debayer)
+        title = f"frame_id={frame.frame_id} timestamp_ns={frame.timestamp_ns}"
+
+        cv2.imshow("imageBufferCplus TCP client", image)
+        print(title)
+
+        if args.save_dir:
+            path = f"{args.save_dir.rstrip('/')}/frame_{frame.frame_id}.png"
+            cv2.imwrite(path, image)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("q"):
+            break
+
+    cv2.destroyAllWindows()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

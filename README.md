@@ -28,6 +28,7 @@ Estrutura atual:
 ```text
 .
 ├── CMakeLists.txt
+├── example_capture_tcp/
 ├── include/image_buffer/CaptureEngine.hpp
 ├── include/image_buffer/FrameTypes.hpp
 ├── include/image_buffer/RingBuffer.hpp
@@ -104,6 +105,18 @@ Resposta de erro:
 
 ```text
 ERR <mensagem>\n
+```
+
+Cliente de exemplo:
+
+A pasta `example_capture_tcp` contém um cliente Python simples para rodar em outra máquina, requisitar frames via rede, desempacotar RAW10 e mostrar a imagem na tela. Ele serve como base para conectar uma etapa posterior de análise por IA.
+
+```bash
+cd example_capture_tcp
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python3 capture_client.py --host <IP_DO_RASPBERRY> --port 8000 --mode latest --count 20
 ```
 
 Observação sobre formato:
