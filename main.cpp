@@ -1,10 +1,12 @@
 #include "image_buffer/CaptureEngine.hpp"
+#include "image_buffer/TcpServer.hpp"
 
 #include <atomic>
 #include <chrono>
 #include <csignal>
 #include <exception>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -48,6 +50,9 @@ void printUsage(const char *program)
         << "  --buffers VALUE        Number of libcamera buffers (default: 6)\n"
         << "  --ring-frames VALUE    Number of preallocated ring buffer frames (default: 150)\n"
         << "  --stats-every VALUE    Print one stats line every N frames (default: 60)\n"
+        << "  --tcp-host ADDRESS     TCP bind address (default: 0.0.0.0)\n"
+        << "  --tcp-port VALUE       TCP port (default: 8000)\n"
+        << "  --no-tcp               Disable TCP server\n"
         << "  --help                 Show this help\n";
 }
 
@@ -56,6 +61,8 @@ void printUsage(const char *program)
 int main(int argc, char **argv)
 {
     image_buffer::CaptureSettings settings;
+    image_buffer::TcpServerSettings tcpSettings;
+    bool tcpEnabled = true;
 
     try {
         for (int i = 1; i < argc; ++i) {
@@ -82,6 +89,12 @@ int main(int argc, char **argv)
                 settings.ringBufferFrames = static_cast<uint32_t>(readIntArg(requireValue(arg), arg));
             } else if (arg == "--stats-every") {
                 settings.statsIntervalFrames = static_cast<uint32_t>(readIntArg(requireValue(arg), arg));
+            } else if (arg == "--tcp-host") {
+                tcpSettings.host = requireValue(arg);
+            } else if (arg == "--tcp-port") {
+                tcpSettings.port = static_cast<uint16_t>(readIntArg(requireValue(arg), arg));
+            } else if (arg == "--no-tcp") {
+                tcpEnabled = false;
             } else if (arg == "--help") {
                 printUsage(argv[0]);
                 return 0;
@@ -91,16 +104,24 @@ int main(int argc, char **argv)
         }
 
         image_buffer::CaptureEngine engine(settings);
+        std::unique_ptr<image_buffer::TcpServer> tcpServer;
 
         std::signal(SIGINT, handleSignal);
         std::signal(SIGTERM, handleSignal);
 
         engine.start();
+        if (tcpEnabled) {
+            tcpServer = std::make_unique<image_buffer::TcpServer>(engine.ringBuffer(), tcpSettings);
+            tcpServer->start();
+        }
 
         while (!gStopRequested.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
+        if (tcpServer) {
+            tcpServer->stop();
+        }
         engine.stop();
         return gStopRequested.load() ? 130 : 0;
     } catch (const std::exception &error) {

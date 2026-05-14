@@ -30,6 +30,9 @@ public:
 
     bool latest(StoredFrameView &frame) const;
     bool find(uint64_t frameId, StoredFrameView &frame) const;
+    bool latestSnapshot(FrameSnapshot &frame) const;
+    bool findSnapshot(uint64_t frameId, FrameSnapshot &frame) const;
+    std::vector<FrameSnapshot> lastSnapshots(size_t count) const;
     RingBufferStats stats() const;
 
 private:
@@ -40,6 +43,7 @@ private:
     };
 
     size_t physicalIndexForFrameId(uint64_t frameId) const;
+    FrameSnapshot snapshotFromSlot(const Slot &slot) const;
 
     mutable std::mutex mutex_;
     std::vector<Slot> slots_;

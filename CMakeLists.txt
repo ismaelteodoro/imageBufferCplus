@@ -18,6 +18,7 @@ add_executable(image_buffer_capture
     main.cpp
     src/CaptureEngine.cpp
     src/RingBuffer.cpp
+    src/TcpServer.cpp
 )
 
 target_include_directories(image_buffer_capture

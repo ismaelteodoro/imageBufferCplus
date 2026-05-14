@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace image_buffer {
 
@@ -27,6 +28,11 @@ struct StoredFrameView {
     FrameDescriptor descriptor;
     const uint8_t *data = nullptr;
     size_t size = 0;
+};
+
+struct FrameSnapshot {
+    FrameDescriptor descriptor;
+    std::vector<uint8_t> payload;
 };
 
 } // namespace image_buffer

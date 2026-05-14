@@ -18,9 +18,10 @@ O projeto já possui a base C++/CMake do engine de aquisição e um executável 
 * mapeia os buffers da libcamera uma vez com `mmap`;
 * cria `FrameDescriptor` e `RawFrameView` para cada frame capturado;
 * copia cada frame RAW para um ring buffer circular pré-alocado de 150 frames;
+* executa servidor TCP para solicitar frames sob demanda;
 * imprime `frame_id`, `sequence`, `timestamp_ns`, delta entre frames, payload, FPS, uso do ring buffer, overwrites e frames descartados.
 
-Nesta etapa ainda não há servidor TCP. A estrutura foi deixada preparada para encaixar o protocolo final sobre o `RingBuffer`.
+O TCP usa snapshots do ring buffer antes de transmitir, evitando que o payload enviado seja sobrescrito enquanto um cliente lento ainda está recebendo dados.
 
 Estrutura atual:
 
@@ -30,9 +31,11 @@ Estrutura atual:
 ├── include/image_buffer/CaptureEngine.hpp
 ├── include/image_buffer/FrameTypes.hpp
 ├── include/image_buffer/RingBuffer.hpp
+├── include/image_buffer/TcpServer.hpp
 ├── main.cpp
 ├── src/CaptureEngine.cpp
-└── src/RingBuffer.cpp
+├── src/RingBuffer.cpp
+└── src/TcpServer.cpp
 ```
 
 Build:
@@ -51,7 +54,56 @@ Execução:
 Opções úteis:
 
 ```bash
-./build/image_buffer_capture --exposure-us 8000 --gain 1.0 --frame-us 16666 --ring-frames 150 --stats-every 60
+./build/image_buffer_capture --exposure-us 8000 --gain 1.0 --frame-us 16666 --ring-frames 150 --stats-every 60 --tcp-port 8000
+```
+
+Para testar somente captura/ring buffer sem TCP:
+
+```bash
+./build/image_buffer_capture --no-tcp
+```
+
+Protocolo TCP:
+
+O cliente envia comandos texto terminados em `\n`:
+
+```text
+PING
+GET_LATEST
+GET_LAST N
+GET_FRAME ID
+```
+
+Resposta de sucesso:
+
+```text
+OK <quantidade_de_frames>\n
+```
+
+Depois da linha `OK`, o servidor envia cada frame como:
+
+```text
+FrameHeader binário little-endian
+payload RAW10 packed
+```
+
+Header binário por frame:
+
+```c
+struct FrameHeader {
+    uint32_t magic;        // 0x314d5849
+    uint64_t frame_id;
+    uint64_t timestamp_ns;
+    uint32_t width;
+    uint32_t height;
+    uint32_t payload_size;
+};
+```
+
+Resposta de erro:
+
+```text
+ERR <mensagem>\n
 ```
 
 Observação sobre formato:
@@ -62,7 +114,7 @@ O código solicita `SRGGB10_CSI2P`, mas neste ambiente a libcamera validou o str
 1456x1088-SBGGR10_CSI2P
 ```
 
-Isso mantém RAW10 CSI-2 packed, resolução cheia e payload cru. A diferença é o padrão Bayer reportado pelo pipeline, que deve ser enviado no protocolo/metadados quando o ring buffer e o TCP forem implementados.
+Isso mantém RAW10 CSI-2 packed, resolução cheia e payload cru. A diferença é o padrão Bayer reportado pelo pipeline.
 
 --------------------------
 

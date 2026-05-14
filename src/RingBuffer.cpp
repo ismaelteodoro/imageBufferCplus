@@ -105,6 +105,66 @@ bool RingBuffer::find(uint64_t frameId, StoredFrameView &frame) const
     return true;
 }
 
+bool RingBuffer::latestSnapshot(FrameSnapshot &frame) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (usedFrames_ == 0) {
+        return false;
+    }
+
+    const size_t index = (writeIndex_ + slots_.size() - 1) % slots_.size();
+    const Slot &slot = slots_[index];
+    if (!slot.valid) {
+        return false;
+    }
+
+    frame = snapshotFromSlot(slot);
+    return true;
+}
+
+bool RingBuffer::findSnapshot(uint64_t frameId, FrameSnapshot &frame) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (usedFrames_ == 0) {
+        return false;
+    }
+
+    const size_t index = physicalIndexForFrameId(frameId);
+    const Slot &slot = slots_[index];
+    if (!slot.valid || slot.descriptor.frameId != frameId) {
+        return false;
+    }
+
+    frame = snapshotFromSlot(slot);
+    return true;
+}
+
+std::vector<FrameSnapshot> RingBuffer::lastSnapshots(size_t count) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    std::vector<FrameSnapshot> frames;
+    if (usedFrames_ == 0 || count == 0) {
+        return frames;
+    }
+
+    const size_t selected = std::min(count, usedFrames_);
+    frames.reserve(selected);
+
+    const size_t first = (writeIndex_ + slots_.size() - selected) % slots_.size();
+    for (size_t offset = 0; offset < selected; ++offset) {
+        const size_t index = (first + offset) % slots_.size();
+        const Slot &slot = slots_[index];
+        if (slot.valid) {
+            frames.push_back(snapshotFromSlot(slot));
+        }
+    }
+
+    return frames;
+}
+
 RingBufferStats RingBuffer::stats() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -125,6 +185,15 @@ size_t RingBuffer::physicalIndexForFrameId(uint64_t frameId) const
     }
 
     return static_cast<size_t>((frameId - 1) % slots_.size());
+}
+
+FrameSnapshot RingBuffer::snapshotFromSlot(const Slot &slot) const
+{
+    FrameSnapshot frame;
+    frame.descriptor = slot.descriptor;
+    frame.payload.resize(slot.descriptor.payloadSize);
+    std::memcpy(frame.payload.data(), slot.payload.data(), frame.payload.size());
+    return frame;
 }
 
 } // namespace image_buffer
