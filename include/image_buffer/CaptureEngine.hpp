@@ -1,9 +1,13 @@
 #pragma once
 
+#include "image_buffer/FrameTypes.hpp"
+#include "image_buffer/RingBuffer.hpp"
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstddef>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -26,15 +30,7 @@ struct CaptureSettings {
     float analogueGain = 1.0f;
     uint32_t bufferCount = 6;
     uint32_t statsIntervalFrames = 60;
-};
-
-struct FrameInfo {
-    uint64_t frameId = 0;
-    uint64_t timestampNs = 0;
-    uint32_t width = 0;
-    uint32_t height = 0;
-    uint32_t payloadSize = 0;
-    uint32_t sequence = 0;
+    uint32_t ringBufferFrames = 150;
 };
 
 class CaptureEngine {
@@ -48,15 +44,31 @@ public:
     void start();
     void stop();
     void wait();
+    RingBuffer &ringBuffer() { return ringBuffer_; }
+    const RingBuffer &ringBuffer() const { return ringBuffer_; }
 
 private:
+    struct MappedPlane {
+        uint8_t *data = nullptr;
+        size_t length = 0;
+    };
+
+    struct MappedBuffer {
+        const libcamera::FrameBuffer *buffer = nullptr;
+        std::vector<MappedPlane> planes;
+    };
+
     void openCamera();
     void configureCamera();
     void allocateBuffers();
+    void mapBuffers();
+    void unmapBuffers();
     void createRequests();
     void applyManualControls(libcamera::ControlList &controls) const;
     void handleRequest(libcamera::Request *request);
-    void printFrameStats(const FrameInfo &frame);
+    RawFrameView makeRawFrameView(const libcamera::FrameBuffer &buffer, uint64_t frameId) const;
+    const MappedBuffer *findMappedBuffer(const libcamera::FrameBuffer &buffer) const;
+    void printFrameStats(const FrameDescriptor &frame);
 
     CaptureSettings settings_;
 
@@ -66,6 +78,12 @@ private:
     std::unique_ptr<libcamera::FrameBufferAllocator> allocator_;
     libcamera::Stream *rawStream_ = nullptr;
     std::vector<std::unique_ptr<libcamera::Request>> requests_;
+    std::vector<MappedBuffer> mappedBuffers_;
+    RingBuffer ringBuffer_;
+
+    std::string pixelFormat_;
+    uint32_t stride_ = 0;
+    uint32_t payloadCapacity_ = 0;
 
     std::atomic<bool> running_{false};
     std::atomic<uint64_t> frameCounter_{0};

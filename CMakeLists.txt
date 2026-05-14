@@ -17,6 +17,7 @@ pkg_check_modules(LIBCAMERA REQUIRED IMPORTED_TARGET libcamera)
 add_executable(image_buffer_capture
     main.cpp
     src/CaptureEngine.cpp
+    src/RingBuffer.cpp
 )
 
 target_include_directories(image_buffer_capture

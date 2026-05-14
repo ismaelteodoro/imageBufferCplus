@@ -3,9 +3,9 @@ get image rpi imx296
 
 --------------------------
 
-## Estado atual da fase 1
+## Estado atual
 
-Esta primeira fase cria a base C++/CMake do engine de aquisição e já possui um executável funcional:
+O projeto já possui a base C++/CMake do engine de aquisição e um executável funcional:
 
 * abre a câmera IMX296 diretamente com libcamera;
 * solicita stream RAW Bayer packed `SRGGB10_CSI2P`;
@@ -15,18 +15,24 @@ Esta primeira fase cria a base C++/CMake do engine de aquisição e já possui u
 * aplica exposição fixa, ganho fixo e frame duration fixo;
 * captura continuamente;
 * re-enfileira buffers libcamera sem alocação contínua;
-* imprime `frame_id`, `sequence`, `timestamp_ns`, delta entre frames, payload, FPS e frames descartados.
+* mapeia os buffers da libcamera uma vez com `mmap`;
+* cria `FrameDescriptor` e `RawFrameView` para cada frame capturado;
+* copia cada frame RAW para um ring buffer circular pré-alocado de 150 frames;
+* imprime `frame_id`, `sequence`, `timestamp_ns`, delta entre frames, payload, FPS, uso do ring buffer, overwrites e frames descartados.
 
-Nesta etapa ainda não há ring buffer nem servidor TCP. A estrutura foi deixada preparada para encaixar essas partes depois, mantendo a captura isolada em `CaptureEngine`.
+Nesta etapa ainda não há servidor TCP. A estrutura foi deixada preparada para encaixar o protocolo final sobre o `RingBuffer`.
 
-Estrutura inicial:
+Estrutura atual:
 
 ```text
 .
 ├── CMakeLists.txt
 ├── include/image_buffer/CaptureEngine.hpp
+├── include/image_buffer/FrameTypes.hpp
+├── include/image_buffer/RingBuffer.hpp
 ├── main.cpp
-└── src/CaptureEngine.cpp
+├── src/CaptureEngine.cpp
+└── src/RingBuffer.cpp
 ```
 
 Build:
@@ -45,7 +51,7 @@ Execução:
 Opções úteis:
 
 ```bash
-./build/image_buffer_capture --exposure-us 8000 --gain 1.0 --frame-us 16666 --stats-every 60
+./build/image_buffer_capture --exposure-us 8000 --gain 1.0 --frame-us 16666 --ring-frames 150 --stats-every 60
 ```
 
 Observação sobre formato:

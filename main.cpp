@@ -46,6 +46,7 @@ void printUsage(const char *program)
         << "  --gain VALUE           Fixed analogue gain (default: 1.0)\n"
         << "  --frame-us VALUE       Fixed frame duration in microseconds (default: 16666)\n"
         << "  --buffers VALUE        Number of libcamera buffers (default: 6)\n"
+        << "  --ring-frames VALUE    Number of preallocated ring buffer frames (default: 150)\n"
         << "  --stats-every VALUE    Print one stats line every N frames (default: 60)\n"
         << "  --help                 Show this help\n";
 }
@@ -77,6 +78,8 @@ int main(int argc, char **argv)
                 settings.frameDurationUs = readIntArg(requireValue(arg), arg);
             } else if (arg == "--buffers") {
                 settings.bufferCount = static_cast<uint32_t>(readIntArg(requireValue(arg), arg));
+            } else if (arg == "--ring-frames") {
+                settings.ringBufferFrames = static_cast<uint32_t>(readIntArg(requireValue(arg), arg));
             } else if (arg == "--stats-every") {
                 settings.statsIntervalFrames = static_cast<uint32_t>(readIntArg(requireValue(arg), arg));
             } else if (arg == "--help") {

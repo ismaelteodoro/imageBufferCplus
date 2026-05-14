@@ -1,10 +1,10 @@
 #include "image_buffer/CaptureEngine.hpp"
 
 #include <algorithm>
-#include <csignal>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <sys/mman.h>
 
 #include <libcamera/control_ids.h>
 #include <libcamera/formats.h>
@@ -60,6 +60,7 @@ void CaptureEngine::start()
     openCamera();
     configureCamera();
     allocateBuffers();
+    mapBuffers();
     createRequests();
 
     libcamera::ControlList controls(camera_->controls());
@@ -86,9 +87,11 @@ void CaptureEngine::start()
 
     std::cout << "capture started: "
               << settings_.width << "x" << settings_.height
-              << " SRGGB10_CSI2P, exposure=" << settings_.exposureTimeUs
+              << " " << pixelFormat_
+              << ", exposure=" << settings_.exposureTimeUs
               << "us, gain=" << settings_.analogueGain
               << ", frame_duration=" << settings_.frameDurationUs << "us"
+              << ", ring_buffer_frames=" << settings_.ringBufferFrames
               << std::endl;
 }
 
@@ -105,6 +108,7 @@ void CaptureEngine::stop()
     }
 
     requests_.clear();
+    unmapBuffers();
     allocator_.reset();
 
     if (camera_) {
@@ -197,6 +201,11 @@ void CaptureEngine::configureCamera()
         throw std::runtime_error("raw stream was not created");
     }
 
+    pixelFormat_ = streamConfig.pixelFormat.toString();
+    stride_ = streamConfig.stride;
+    payloadCapacity_ = streamConfig.frameSize;
+    ringBuffer_.reset(settings_.ringBufferFrames, payloadCapacity_);
+
     std::cout << "configuration: " << streamConfig.toString()
               << " (" << statusToString(validationStatus) << ")"
               << ", buffers=" << streamConfig.bufferCount
@@ -220,6 +229,52 @@ void CaptureEngine::allocateBuffers()
     }
 
     std::cout << "allocated buffers: " << buffers.size() << std::endl;
+}
+
+void CaptureEngine::mapBuffers()
+{
+    const auto &buffers = allocator_->buffers(rawStream_);
+    mappedBuffers_.clear();
+    mappedBuffers_.reserve(buffers.size());
+
+    for (const auto &buffer : buffers) {
+        MappedBuffer mapped;
+        mapped.buffer = buffer.get();
+        mapped.planes.reserve(buffer->planes().size());
+
+        for (const auto &plane : buffer->planes()) {
+            void *memory = mmap(nullptr, plane.length, PROT_READ, MAP_SHARED,
+                                plane.fd.get(), plane.offset);
+            if (memory == MAP_FAILED) {
+                unmapBuffers();
+                throw std::runtime_error("failed to mmap libcamera frame buffer plane");
+            }
+
+            MappedPlane mappedPlane;
+            mappedPlane.data = static_cast<uint8_t *>(memory);
+            mappedPlane.length = plane.length;
+            mapped.planes.push_back(mappedPlane);
+        }
+
+        mappedBuffers_.push_back(std::move(mapped));
+    }
+
+    std::cout << "mapped buffers: " << mappedBuffers_.size() << std::endl;
+}
+
+void CaptureEngine::unmapBuffers()
+{
+    for (auto &buffer : mappedBuffers_) {
+        for (auto &plane : buffer.planes) {
+            if (plane.data && plane.length > 0) {
+                munmap(plane.data, plane.length);
+                plane.data = nullptr;
+                plane.length = 0;
+            }
+        }
+    }
+
+    mappedBuffers_.clear();
 }
 
 void CaptureEngine::createRequests()
@@ -282,15 +337,16 @@ void CaptureEngine::handleRequest(libcamera::Request *request)
     }
 
     const uint64_t frameId = frameCounter_.fetch_add(1) + 1;
-    FrameInfo frame;
-    frame.frameId = frameId;
-    frame.timestampNs = buffer->metadata().timestamp;
-    frame.width = settings_.width;
-    frame.height = settings_.height;
-    frame.payloadSize = payloadBytes(*buffer);
-    frame.sequence = buffer->metadata().sequence;
+    RawFrameView rawFrame;
+    try {
+        rawFrame = makeRawFrameView(*buffer, frameId);
+        ringBuffer_.write(rawFrame);
+    } catch (const std::exception &error) {
+        droppedFrames_.fetch_add(1);
+        std::cerr << "failed to store frame in ring buffer: " << error.what() << std::endl;
+    }
 
-    printFrameStats(frame);
+    printFrameStats(rawFrame.descriptor);
 
     request->reuse(libcamera::Request::ReuseBuffers);
     const int queueResult = camera_->queueRequest(request);
@@ -300,7 +356,51 @@ void CaptureEngine::handleRequest(libcamera::Request *request)
     }
 }
 
-void CaptureEngine::printFrameStats(const FrameInfo &frame)
+RawFrameView CaptureEngine::makeRawFrameView(const libcamera::FrameBuffer &buffer, uint64_t frameId) const
+{
+    const MappedBuffer *mapped = findMappedBuffer(buffer);
+    if (!mapped) {
+        throw std::runtime_error("completed frame buffer is not mapped");
+    }
+
+    if (mapped->planes.size() != 1 || buffer.metadata().planes().size() != 1) {
+        throw std::runtime_error("only single-plane RAW buffers are supported in this phase");
+    }
+
+    const uint32_t usedBytes = payloadBytes(buffer);
+    if (usedBytes > mapped->planes.front().length) {
+        throw std::runtime_error("frame metadata bytesused exceeds mapped plane length");
+    }
+
+    RawFrameView view;
+    view.descriptor.frameId = frameId;
+    view.descriptor.timestampNs = buffer.metadata().timestamp;
+    view.descriptor.width = settings_.width;
+    view.descriptor.height = settings_.height;
+    view.descriptor.stride = stride_;
+    view.descriptor.payloadSize = usedBytes;
+    view.descriptor.sequence = buffer.metadata().sequence;
+    view.descriptor.pixelFormat = pixelFormat_;
+    view.data = mapped->planes.front().data;
+    view.size = usedBytes;
+    return view;
+}
+
+const CaptureEngine::MappedBuffer *CaptureEngine::findMappedBuffer(const libcamera::FrameBuffer &buffer) const
+{
+    const auto it = std::find_if(mappedBuffers_.begin(), mappedBuffers_.end(),
+                                 [&buffer](const MappedBuffer &mapped) {
+                                     return mapped.buffer == &buffer;
+                                 });
+
+    if (it == mappedBuffers_.end()) {
+        return nullptr;
+    }
+
+    return &(*it);
+}
+
+void CaptureEngine::printFrameStats(const FrameDescriptor &frame)
 {
     const uint64_t previousTimestamp = lastTimestampNs_;
     lastTimestampNs_ = frame.timestampNs;
@@ -313,6 +413,7 @@ void CaptureEngine::printFrameStats(const FrameInfo &frame)
         const double deltaMs = previousTimestamp == 0
                                    ? 0.0
                                    : static_cast<double>(frame.timestampNs - previousTimestamp) / 1'000'000.0;
+        const RingBufferStats ringStats = ringBuffer_.stats();
 
         std::cout << "frame_id=" << frame.frameId
                   << " seq=" << frame.sequence
@@ -320,6 +421,8 @@ void CaptureEngine::printFrameStats(const FrameInfo &frame)
                   << " delta_ms=" << deltaMs
                   << " payload=" << frame.payloadSize
                   << " fps=" << fps
+                  << " ring=" << ringStats.usedFrames << "/" << ringStats.capacityFrames
+                  << " overwrites=" << ringStats.overwrites
                   << " dropped=" << droppedFrames_.load()
                   << std::endl;
 
