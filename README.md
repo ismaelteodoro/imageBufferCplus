@@ -3,6 +3,63 @@ get image rpi imx296
 
 --------------------------
 
+## Estado atual da fase 1
+
+Esta primeira fase cria a base C++/CMake do engine de aquisição e já possui um executável funcional:
+
+* abre a câmera IMX296 diretamente com libcamera;
+* solicita stream RAW Bayer packed `SRGGB10_CSI2P`;
+* valida resolução `1456x1088`;
+* aceita o ajuste real do driver Raspberry Pi para outro Bayer RAW10 CSI-2 packed equivalente, observado como `SBGGR10_CSI2P`;
+* desativa auto exposure e auto white balance;
+* aplica exposição fixa, ganho fixo e frame duration fixo;
+* captura continuamente;
+* re-enfileira buffers libcamera sem alocação contínua;
+* imprime `frame_id`, `sequence`, `timestamp_ns`, delta entre frames, payload, FPS e frames descartados.
+
+Nesta etapa ainda não há ring buffer nem servidor TCP. A estrutura foi deixada preparada para encaixar essas partes depois, mantendo a captura isolada em `CaptureEngine`.
+
+Estrutura inicial:
+
+```text
+.
+├── CMakeLists.txt
+├── include/image_buffer/CaptureEngine.hpp
+├── main.cpp
+└── src/CaptureEngine.cpp
+```
+
+Build:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+```
+
+Execução:
+
+```bash
+./build/image_buffer_capture
+```
+
+Opções úteis:
+
+```bash
+./build/image_buffer_capture --exposure-us 8000 --gain 1.0 --frame-us 16666 --stats-every 60
+```
+
+Observação sobre formato:
+
+O código solicita `SRGGB10_CSI2P`, mas neste ambiente a libcamera validou o stream como:
+
+```text
+1456x1088-SBGGR10_CSI2P
+```
+
+Isso mantém RAW10 CSI-2 packed, resolução cheia e payload cru. A diferença é o padrão Bayer reportado pelo pipeline, que deve ser enviado no protocolo/metadados quando o ring buffer e o TCP forem implementados.
+
+--------------------------
+
 
 Você é um engenheiro sênior especialista em C++, Linux embarcado, libcamera, machine vision e sistemas de aquisição de alta velocidade.
 
@@ -271,4 +328,3 @@ Prioridade máxima:
 * eficiência de memória
 * mínima cópia possível
 * funcionamento contínuo 24/7
-
