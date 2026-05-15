@@ -55,7 +55,7 @@ Execução:
 Opções úteis:
 
 ```bash
-./build/image_buffer_capture --exposure-us 8000 --gain 1.0 --frame-us 16666 --ring-frames 150 --stats-every 60 --tcp-port 8000
+./build/image_buffer_capture --exposure-us 8000 --gain 1.0 --frame-us 16666 --ring-frames 150 --stats-every 60 --tcp-port 5003
 ```
 
 Para testar somente captura/ring buffer sem TCP:
@@ -116,7 +116,7 @@ cd example_capture_tcp
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python3 capture_client.py --host <IP_DO_RASPBERRY> --port 8000 --mode latest --count 20
+python3 capture_client.py --host <IP_DO_RASPBERRY> --port 5003 --mode latest --count 20
 ```
 
 Observação sobre formato:
@@ -399,3 +399,7 @@ Prioridade máxima:
 * eficiência de memória
 * mínima cópia possível
 * funcionamento contínuo 24/7
+
+Conclusão e entendimentos futuros: 
+O dado cru verdadeiro está chegando no cliente. 
+Para máxima flexibilidade e menos ambiguidade, eu recomendaria evoluir o header TCP para incluir stride, sequence e pixelFormat/Bayer pattern, e no cliente expor claramente frame.payload e raw10 como a saída primária antes de qualquer preview/filtro.

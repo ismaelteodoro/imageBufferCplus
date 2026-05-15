@@ -51,7 +51,7 @@ void printUsage(const char *program)
         << "  --ring-frames VALUE    Number of preallocated ring buffer frames (default: 150)\n"
         << "  --stats-every VALUE    Print one stats line every N frames (default: 60)\n"
         << "  --tcp-host ADDRESS     TCP bind address (default: 0.0.0.0)\n"
-        << "  --tcp-port VALUE       TCP port (default: 8000)\n"
+        << "  --tcp-port VALUE       TCP port (default: 5003)\n"
         << "  --no-tcp               Disable TCP server\n"
         << "  --help                 Show this help\n";
 }
