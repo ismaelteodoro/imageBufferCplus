@@ -13,6 +13,13 @@ import numpy as np
 
 FRAME_MAGIC = 0x314D5849
 HEADER_STRUCT = struct.Struct("<IQQIII")
+RAW10_WHITE_LEVEL = 1023.0
+BAYER_TO_BGR_CODES = {
+    "bg": cv2.COLOR_BayerBG2BGR,
+    "gb": cv2.COLOR_BayerGB2BGR,
+    "gr": cv2.COLOR_BayerGR2BGR,
+    "rg": cv2.COLOR_BayerRG2BGR,
+}
 
 
 @dataclass(frozen=True)
@@ -135,15 +142,49 @@ def unpack_raw10_csi2p(payload: bytes, width: int, height: int) -> np.ndarray:
     return pixels.reshape(height, width)
 
 
-def frame_to_display_bgr(frame: RawFrame, debayer: bool) -> np.ndarray:
-    raw10 = unpack_raw10_csi2p(frame.payload, frame.width, frame.height)
-    gray8 = np.right_shift(raw10, 2).astype(np.uint8)
+def apply_preview_curve(image: np.ndarray, args: argparse.Namespace) -> np.ndarray:
+    preview = image.astype(np.float32, copy=False)
 
-    if not debayer:
+    if args.auto_levels:
+        low, high = np.percentile(preview, (args.black_percentile, args.white_percentile))
+        if high > low:
+            preview = (preview - low) / (high - low)
+
+    preview = np.clip(preview, 0.0, 1.0)
+
+    if args.gamma > 0.0 and args.gamma != 1.0:
+        preview = np.power(preview, 1.0 / args.gamma)
+
+    return np.clip(preview * 255.0, 0.0, 255.0).astype(np.uint8)
+
+
+def adjust_saturation_bgr(image: np.ndarray, saturation: float) -> np.ndarray:
+    if saturation == 1.0:
+        return image
+
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    hsv[:, :, 1] = np.clip(hsv[:, :, 1].astype(np.float32) * saturation, 0.0, 255.0).astype(np.uint8)
+    return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+
+def frame_to_display_bgr(frame: RawFrame, args: argparse.Namespace) -> np.ndarray:
+    raw10 = unpack_raw10_csi2p(frame.payload, frame.width, frame.height)
+
+    if args.no_debayer:
+        gray = raw10.astype(np.float32) / RAW10_WHITE_LEVEL
+        gray8 = apply_preview_curve(gray, args)
         return cv2.cvtColor(gray8, cv2.COLOR_GRAY2BGR)
 
-    # The current Raspberry Pi pipeline reports SBGGR10_CSI2P for the IMX296.
-    return cv2.cvtColor(gray8, cv2.COLOR_BayerBG2BGR)
+    bayer_code = BAYER_TO_BGR_CODES[args.bayer]
+    bgr16 = cv2.cvtColor(raw10, bayer_code)
+    preview = bgr16.astype(np.float32) / RAW10_WHITE_LEVEL
+
+    preview[:, :, 0] *= args.blue_gain
+    preview[:, :, 1] *= args.green_gain
+    preview[:, :, 2] *= args.red_gain
+
+    display = apply_preview_curve(preview, args)
+    return adjust_saturation_bgr(display, args.saturation)
 
 
 def iter_requested_frames(client: CaptureTcpClient, args: argparse.Namespace) -> Iterable[RawFrame]:
@@ -175,6 +216,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--frame-id", type=int, default=1, help="Frame id for GET_FRAME")
     parser.add_argument("--interval-ms", type=int, default=100, help="Delay between GET_LATEST requests")
     parser.add_argument("--no-debayer", action="store_true", help="Show raw grayscale instead of debayered BGR")
+    parser.add_argument("--bayer", choices=tuple(BAYER_TO_BGR_CODES), default="rg", help="Bayer pattern used for preview")
+    parser.add_argument("--red-gain", type=float, default=1.8, help="Preview gain applied to the red channel")
+    parser.add_argument("--green-gain", type=float, default=1.0, help="Preview gain applied to the green channel")
+    parser.add_argument("--blue-gain", type=float, default=1.8, help="Preview gain applied to the blue channel")
+    parser.add_argument("--saturation", type=float, default=1.0, help="Preview color saturation multiplier")
+    parser.add_argument("--gamma", type=float, default=1.0, help="Preview gamma. Use 1.0 for linear RAW display")
+    parser.add_argument("--no-auto-levels", dest="auto_levels", action="store_false", help="Disable preview contrast stretching")
+    parser.add_argument("--black-percentile", type=float, default=0.5, help="Low percentile for auto-levels")
+    parser.add_argument("--white-percentile", type=float, default=99.5, help="High percentile for auto-levels")
+    parser.set_defaults(auto_levels=True)
     parser.add_argument("--save-dir", default="", help="Optional directory to save PNG previews")
     return parser.parse_args()
 
@@ -184,7 +235,7 @@ def main() -> int:
     client = CaptureTcpClient(args.host, args.port)
 
     for frame in iter_requested_frames(client, args):
-        image = frame_to_display_bgr(frame, debayer=not args.no_debayer)
+        image = frame_to_display_bgr(frame, args)
         title = f"frame_id={frame.frame_id} timestamp_ns={frame.timestamp_ns}"
 
         cv2.imshow("imageBufferCplus TCP client", image)

@@ -21,6 +21,9 @@ pip install -r requirements.txt
 ```
 
 Exemplo de uso:
+```bash
+python capture_client.py --host 203.0.113.10
+```
 
 ```bash
 python3 capture_client.py --host 192.168.1.50 --port 8000 --mode latest --count 20
