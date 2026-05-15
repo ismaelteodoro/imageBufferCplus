@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -30,11 +31,19 @@ public:
     void stop();
 
 private:
+    struct ClientThread {
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> finished;
+    };
+
     void acceptLoop();
     void handleClient(int clientFd);
     void handleCommand(int clientFd, const std::string &commandLine);
     void sendFrames(int clientFd, const std::vector<FrameSnapshot> &frames);
     void sendError(int clientFd, const std::string &message);
+    void pruneClientThreadsLocked();
+    size_t activeClientCountLocked() const;
+    void unregisterClientFd(int clientFd);
 
     RingBuffer &ringBuffer_;
     TcpServerSettings settings_;
@@ -43,7 +52,8 @@ private:
     int serverFd_ = -1;
     std::thread acceptThread_;
     std::mutex clientThreadsMutex_;
-    std::vector<std::thread> clientThreads_;
+    std::vector<ClientThread> clientThreads_;
+    std::vector<int> clientFds_;
 };
 
 } // namespace image_buffer

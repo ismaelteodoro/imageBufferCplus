@@ -1,14 +1,17 @@
 #include "image_buffer/TcpServer.hpp"
 
 #include <cerrno>
+#include <algorithm>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -18,6 +21,9 @@ namespace {
 
 constexpr uint32_t kFrameMagic = 0x314d5849; // "IMX1" in little-endian memory.
 constexpr size_t kMaxCommandBytes = 256;
+constexpr size_t kMaxClients = 3;
+constexpr size_t kMaxGetLastFrames = 150;
+constexpr time_t kSocketTimeoutSeconds = 1;
 
 #pragma pack(push, 1)
 struct WireFrameHeader {
@@ -122,6 +128,12 @@ void TcpServer::start()
         throw std::runtime_error("failed to listen on TCP socket: " + error);
     }
 
+    {
+        std::lock_guard<std::mutex> lock(clientThreadsMutex_);
+        clientThreads_.reserve(kMaxClients);
+        clientFds_.reserve(kMaxClients);
+    }
+
     acceptThread_ = std::thread(&TcpServer::acceptLoop, this);
 
     std::cout << "tcp server listening on " << settings_.host << ":" << settings_.port << std::endl;
@@ -143,18 +155,58 @@ void TcpServer::stop()
         acceptThread_.join();
     }
 
-    std::lock_guard<std::mutex> lock(clientThreadsMutex_);
-    for (auto &thread : clientThreads_) {
-        if (thread.joinable()) {
-            thread.join();
+    std::vector<int> clientFds;
+    {
+        std::lock_guard<std::mutex> lock(clientThreadsMutex_);
+        clientFds = clientFds_;
+    }
+
+    for (const int clientFd : clientFds) {
+        ::shutdown(clientFd, SHUT_RDWR);
+    }
+
+    std::vector<ClientThread> clientThreads;
+    {
+        std::lock_guard<std::mutex> lock(clientThreadsMutex_);
+        clientThreads.swap(clientThreads_);
+        clientFds_.clear();
+    }
+
+    for (auto &client : clientThreads) {
+        if (client.thread.joinable()) {
+            client.thread.join();
         }
     }
-    clientThreads_.clear();
 }
 
 void TcpServer::acceptLoop()
 {
     while (running_.load()) {
+        {
+            std::lock_guard<std::mutex> lock(clientThreadsMutex_);
+            pruneClientThreadsLocked();
+        }
+
+        pollfd serverPoll {};
+        serverPoll.fd = serverFd_;
+        serverPoll.events = POLLIN;
+        const int pollResult = ::poll(&serverPoll, 1, static_cast<int>(kSocketTimeoutSeconds * 1000));
+        if (pollResult < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (running_.load()) {
+                std::cerr << "tcp poll failed: " << std::strerror(errno) << std::endl;
+            }
+            continue;
+        }
+        if (pollResult == 0) {
+            continue;
+        }
+        if ((serverPoll.revents & POLLIN) == 0) {
+            continue;
+        }
+
         sockaddr_in clientAddress {};
         socklen_t clientLength = sizeof(clientAddress);
         const int clientFd = ::accept(serverFd_, reinterpret_cast<sockaddr *>(&clientAddress), &clientLength);
@@ -166,11 +218,37 @@ void TcpServer::acceptLoop()
         }
 
         timeval timeout {};
-        timeout.tv_sec = 1;
-        ::setsockopt(clientFd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        timeout.tv_sec = kSocketTimeoutSeconds;
+        if (::setsockopt(clientFd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+            std::cerr << "tcp failed to set receive timeout: " << std::strerror(errno) << std::endl;
+        }
+        if (::setsockopt(clientFd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) < 0) {
+            std::cerr << "tcp failed to set send timeout: " << std::strerror(errno) << std::endl;
+        }
 
         std::lock_guard<std::mutex> lock(clientThreadsMutex_);
-        clientThreads_.emplace_back(&TcpServer::handleClient, this, clientFd);
+        if (activeClientCountLocked() >= kMaxClients) {
+            ::close(clientFd);
+            continue;
+        }
+
+        auto finished = std::make_shared<std::atomic<bool>>(false);
+        clientFds_.push_back(clientFd);
+        clientThreads_.push_back({ std::thread([this, clientFd, finished]() {
+                                       try {
+                                           handleClient(clientFd);
+                                       } catch (const std::exception &error) {
+                                           std::cerr << "tcp client handler failed: " << error.what() << std::endl;
+                                           unregisterClientFd(clientFd);
+                                           ::close(clientFd);
+                                       } catch (...) {
+                                           std::cerr << "tcp client handler failed with unknown error" << std::endl;
+                                           unregisterClientFd(clientFd);
+                                           ::close(clientFd);
+                                       }
+                                       finished->store(true);
+                                   }),
+                                   finished });
     }
 }
 
@@ -206,6 +284,7 @@ void TcpServer::handleClient(int clientFd)
         }
     }
 
+    unregisterClientFd(clientFd);
     ::close(clientFd);
 }
 
@@ -249,6 +328,11 @@ void TcpServer::handleCommand(int clientFd, const std::string &commandLine)
         size_t count = 0;
         if (!(parser >> count)) {
             sendError(clientFd, "usage: GET_LAST N");
+            return;
+        }
+
+        if (count > kMaxGetLastFrames) {
+            sendError(clientFd, "GET_LAST limit is 150 frames");
             return;
         }
 
@@ -302,6 +386,41 @@ void TcpServer::sendError(int clientFd, const std::string &message)
 {
     const std::string response = "ERR " + message + "\n";
     sendAll(clientFd, response.data(), response.size());
+}
+
+void TcpServer::pruneClientThreadsLocked()
+{
+    auto client = clientThreads_.begin();
+    while (client != clientThreads_.end()) {
+        if (client->finished && client->finished->load()) {
+            if (client->thread.joinable()) {
+                client->thread.join();
+            }
+            client = clientThreads_.erase(client);
+            continue;
+        }
+        ++client;
+    }
+}
+
+size_t TcpServer::activeClientCountLocked() const
+{
+    size_t activeClients = 0;
+    for (const ClientThread &client : clientThreads_) {
+        if (!client.finished || !client.finished->load()) {
+            ++activeClients;
+        }
+    }
+    return activeClients;
+}
+
+void TcpServer::unregisterClientFd(int clientFd)
+{
+    std::lock_guard<std::mutex> lock(clientThreadsMutex_);
+    const auto client = std::find(clientFds_.begin(), clientFds_.end(), clientFd);
+    if (client != clientFds_.end()) {
+        clientFds_.erase(client);
+    }
 }
 
 } // namespace image_buffer
