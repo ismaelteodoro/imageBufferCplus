@@ -168,7 +168,7 @@ def iter_requested_frames(client: CaptureTcpClient, args: argparse.Namespace) ->
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Example TCP client for imageBufferCplus RAW10 frames")
     parser.add_argument("--host", required=True, help="Raspberry Pi IP or hostname")
-    parser.add_argument("--port", type=int, default=8000, help="TCP port")
+    parser.add_argument("--port", type=int, default=5003, help="TCP port")
     parser.add_argument("--mode", choices=("latest", "last", "frame"), default="latest")
     parser.add_argument("--count", type=int, default=20, help="Number of GET_LATEST requests")
     parser.add_argument("--last", type=int, default=5, help="Number of frames for GET_LAST")

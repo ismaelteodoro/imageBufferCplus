@@ -14,7 +14,7 @@ namespace image_buffer {
 
 struct TcpServerSettings {
     std::string host = "0.0.0.0";
-    uint16_t port = 8000;
+    uint16_t port = 5003;
     uint32_t listenBacklog = 8;
 };
 
