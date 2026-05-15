@@ -92,11 +92,39 @@ class CaptureTcpClient:
 
 
 def unpack_raw10_csi2p(payload: bytes, width: int, height: int) -> np.ndarray:
-    expected_size = width * height * 5 // 4
-    if len(payload) != expected_size:
-        raise ValueError(f"unexpected RAW10 payload size: got {len(payload)}, expected {expected_size}")
+    useful_row_bytes = width * 5 // 4
+    expected_contiguous_size = useful_row_bytes * height
 
-    packed = np.frombuffer(payload, dtype=np.uint8).reshape(-1, 5).astype(np.uint16)
+    payload_size = len(payload)
+
+    if payload_size == expected_contiguous_size:
+        stride_bytes = useful_row_bytes
+    else:
+        if payload_size % height != 0:
+            raise ValueError(
+                f"unexpected RAW10 payload size: got {payload_size}, "
+                f"expected contiguous {expected_contiguous_size}, "
+                f"and payload is not divisible by height={height}"
+            )
+
+        stride_bytes = payload_size // height
+
+        if stride_bytes < useful_row_bytes:
+            raise ValueError(
+                f"invalid RAW10 stride: stride={stride_bytes}, "
+                f"useful_row_bytes={useful_row_bytes}"
+            )
+
+    raw = np.frombuffer(payload, dtype=np.uint8)
+
+    # Quebra o payload em linhas considerando o stride real enviado pelo servidor.
+    rows = raw.reshape(height, stride_bytes)
+
+    # Remove o padding do final de cada linha.
+    useful = rows[:, :useful_row_bytes]
+
+    # Agora sim o RAW10 útil pode ser interpretado em grupos de 5 bytes.
+    packed = useful.reshape(-1, 5).astype(np.uint16)
 
     pixels = np.empty((packed.shape[0], 4), dtype=np.uint16)
     pixels[:, 0] = (packed[:, 0] << 2) | (packed[:, 4] & 0x03)
